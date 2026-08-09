@@ -1,8 +1,7 @@
-"""星光楼宇 FME3 门禁 HA 集成 — 修复版 v1.1.0。
-- 正确解析双向帧 (每 read 含 N×14 字节)
-- 超时机制关闭视频/通话状态
-- 忽略非 0x55 乱码
+"""星光楼宇 FME3 门禁控制器 HA 自定义集成。
+后台线程持续监听 RS485 总线, 实时追踪呼叫/视频/开锁状态。
 """
+import datetime
 import logging
 import os
 import threading
@@ -22,14 +21,16 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.LOCK, Platform.BUTTON, Platform.BINARY_SENSOR]
 
-async def async_setup(hass, config):
+
+async def async_setup(hass: HomeAssistant, config: dict):
     if any(e.domain == DOMAIN for e in hass.config_entries.async_entries()):
         return True
     hass.async_create_task(
         hass.config_entries.flow.async_init(DOMAIN, context={"source": "import"}, data={}))
     return True
 
-async def async_setup_entry(hass, entry):
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
     if "bus" not in hass.data[DOMAIN]:
         bus = MenjinBus(hass)
@@ -38,13 +39,21 @@ async def async_setup_entry(hass, entry):
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
-async def async_unload_entry(hass, entry):
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
+    bus = hass.data[DOMAIN].get("bus")
+    if bus:
+        bus.stop()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
+
 class MenjinBus:
-    def __init__(self, hass):
+    """串口总线读写器 (后台线程)."""
+
+    def __init__(self, hass: HomeAssistant):
         self.hass = hass
-        self._thread = None
+        self._thread: threading.Thread | None = None
+        self._timeout_thread: threading.Thread | None = None
         self._running = False
         self._ser = None
         self._lock = threading.Lock()
@@ -52,10 +61,8 @@ class MenjinBus:
         self.video_active = False
         self.unlocked = False
         self.unlock_time = 0.0
-        # 超时追踪
         self._last_video_event = 0.0
         self._last_call_event = 0.0
-        # 帧日志
         self._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menjin_frames")
         try:
             os.makedirs(self._log_dir, exist_ok=True)
@@ -77,6 +84,15 @@ class MenjinBus:
             target=self._timeout_loop, daemon=True, name="MenjinTimeout")
         self._timeout_thread.start()
 
+    def stop(self):
+        self._running = False
+        if self._ser:
+            try:
+                self._ser.close()
+            except Exception:
+                pass
+            self._ser = None
+
     def _open_serial(self):
         import serial
         try:
@@ -93,7 +109,6 @@ class MenjinBus:
                     self._open_serial()
                 if self._ser is None:
                     return False
-                self._ser.reset_input_buffer()
                 self._ser.write(frame)
                 self._ser.flush()
                 return True
@@ -122,7 +137,6 @@ class MenjinBus:
             self._log_raw(chunk)
             buf += chunk
 
-            # 从缓冲区解析帧, 移除已消费字节
             consumed = 0
             while consumed + FRAME_LEN <= len(buf):
                 parsed = parse_frame(bytes(buf[consumed:consumed + FRAME_LEN]))
@@ -138,14 +152,14 @@ class MenjinBus:
             if len(buf) > 512:
                 buf.clear()
 
-    def _process_frame(self, parsed):
+    def _process_frame(self, parsed: dict):
         cmd = parsed["cmd"]
-        _LOGGER.info("收到帧 cmd=0x%02x", cmd)
+        _LOGGER.debug("收到帧 cmd=0x%02x payload=%s", cmd, parsed["payload"].hex())
         now = time.time()
         new = {}
 
         if cmd == CMD_MONITOR:
-            pass  # 监视请求 (由我们发出的, 忽略)
+            pass  # 监视请求回显, 状态由主机的 ACK 帧确认
         elif cmd == CMD_CALL_START:
             if not self.call_active:
                 self.call_active = True
@@ -160,21 +174,17 @@ class MenjinBus:
                 self.video_active = True
                 new["video_active"] = True
             self._last_video_event = now
-        elif cmd == CMD_UNLOCK_ANS or cmd == CMD_UNLOCK_F3:
+        elif cmd in (CMD_UNLOCK_ANS, CMD_UNLOCK_F3):
             self.unlocked = True
             self.unlock_time = now
             new["unlocked"] = True
-            # 开锁意味着视频/通话活跃
             self._last_video_event = now
-            if not self.video_active:
-                self.video_active = True
-                new["video_active"] = True
 
         if new:
             self._fire(new)
 
-    def _fire(self, states):
-        _LOGGER.info("状态变更: %s", states)
+    def _fire(self, states: dict):
+        _LOGGER.debug("状态变更: %s", states)
         self.hass.loop.call_soon_threadsafe(
             lambda: self.hass.bus.async_fire(f"{DOMAIN}_state_change", dict(states)))
 
@@ -182,7 +192,6 @@ class MenjinBus:
         if not self._log_dir:
             return
         try:
-            import datetime
             today = datetime.date.today().isoformat()
             path = f"{self._log_dir}/{today}.log"
             ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -194,7 +203,7 @@ class MenjinBus:
 
     def _timeout_loop(self):
         while self._running:
-            time.sleep(10)
+            time.sleep(5)
             now = time.time()
             new = {}
             if self.video_active and now - self._last_video_event > VIDEO_TIMEOUT:
@@ -206,19 +215,16 @@ class MenjinBus:
             if new:
                 self._fire(new)
 
-    def monitor(self):
+    def monitor(self) -> bool:
         return self.send(MONITOR)
 
-    def unlock(self):
-        self.send(MONITOR)
+    def unlock(self) -> bool:
+        """空闲开锁: 先监视建立通道, 再发开锁. 状态由总线事件驱动."""
+        ok = self.send(MONITOR)
         time.sleep(1)
-        self.send(UNLOCK34)
-        time.sleep(0.3)
-        try:
-            d = self._ser.read(256) if self._ser else b""
-            return d and b"\x55\x39" in d
-        except Exception:
-            return False
+        ok = self.send(UNLOCK34) and ok
+        return ok
 
-    def unlock_call(self):
+    def unlock_call(self) -> bool:
+        """通话/视频中开锁."""
         return self.send(UNLOCK34)

@@ -28,13 +28,10 @@ class MenjinLock(LockEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        bus = self.hass.data[DOMAIN]["bus"]
-        self._bus = bus
-        # 监听开锁事件
+        self._bus = self.hass.data[DOMAIN]["bus"]
         self.async_on_remove(
             self.hass.bus.async_listen(f"{DOMAIN}_state_change", self._on_unlocked)
         )
-        # 自动恢复锁定协程
         self.hass.loop.create_task(self._auto_relock())
 
     async def _auto_relock(self):
@@ -55,10 +52,12 @@ class MenjinLock(LockEntity):
         return self._attr_is_locked
 
     def unlock(self, **kwargs):
+        """HA 在 executor 线程调用. 状态由总线回显事件驱动, 这里只负责发送."""
         self._unlock_time = time.time()
         if self._bus.video_active or self._bus.call_active:
             ok = self._bus.unlock_call()
         else:
             ok = self._bus.unlock()
-        self._attr_is_locked = not ok
-        self.schedule_update_ha_state()
+        if not ok:
+            _LOGGER.error("开锁指令发送失败")
+        # 不直接改状态: 成功开锁由总线回显 0x34/0xf3 事件更新

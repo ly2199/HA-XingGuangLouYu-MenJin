@@ -1,5 +1,6 @@
 """状态传感器: 来电呼叫 / 视频通道 / 锁状态。"""
 import asyncio
+import time
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from .const import DOMAIN
 
@@ -26,12 +27,22 @@ class MenjinBinary(BinarySensorEntity):
         self._attr_icon = icon
         self._attr_is_on = False
         self._reset_after = reset_after
+        self._reset_time = 0.0
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
         self.async_on_remove(
             self.hass.bus.async_listen(f"{DOMAIN}_state_change", self._on_state)
         )
+        if self._reset_after > 0:
+            self.hass.loop.create_task(self._auto_reset())
+
+    async def _auto_reset(self):
+        while True:
+            await asyncio.sleep(1)
+            if self._attr_is_on and time.time() - self._reset_time > self._reset_after:
+                self._attr_is_on = False
+                self.schedule_update_ha_state()
 
     def _on_state(self, event):
         if self._key == "call":
@@ -41,11 +52,5 @@ class MenjinBinary(BinarySensorEntity):
         elif self._key == "locked":
             if event.data.get("unlocked"):
                 self._attr_is_on = True
-                if self._reset_after > 0:
-                    self.hass.loop.create_task(self._reset_later())
-        self.schedule_update_ha_state()
-
-    async def _reset_later(self):
-        await asyncio.sleep(self._reset_after)
-        self._attr_is_on = False
+                self._reset_time = time.time()
         self.schedule_update_ha_state()
