@@ -46,7 +46,7 @@ class MenjinLock(LockEntity):
     def is_locked(self):
         return not self._state
 
-    async def async_open(self, **kwargs):
+    async def async_unlock(self, **kwargs):
         if self._bus.video_active or self._bus.call_active:
             _LOGGER.info("开锁: 通话/视频中, 直接发 0x34")
             ok = await self.hass.async_add_executor_job(self._bus.unlock_call)
