@@ -3,7 +3,6 @@ import asyncio
 import time
 import logging
 from homeassistant.components.lock import LockEntity, LockEntityFeature
-from homeassistant.const import Platform
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,31 +25,28 @@ class MenjinLock(LockEntity):
         self.hass = hass
         self._attr_unique_id = f"{DOMAIN}_lock"
         self._attr_name = None
-        self._state = None
+        self._state = False
         bus = hass.data[DOMAIN]["bus"]
-        # 注册状态变更回调
-        def on_state(event):
-            if event.data.get("unlocked"):
-                self._state = True
-                self.async_write_ha_state()
-        hass.bus.async_listen(f"{DOMAIN}_state_change", on_state)
+        hass.bus.async_listen(f"{DOMAIN}_state_change", self._on_state)
 
-        # 自动恢复锁定状态
-        async def auto_lock():
+        async def auto_relock():
             while True:
-                await self.hass.async_add_executor_job(lambda: None)  # no-op, just loop
+                await asyncio.sleep(1)
                 if self._state and time.time() - bus.unlock_time > 3:
                     self._state = False
                     self.async_write_ha_state()
-                await asyncio.sleep(1)
-        self.hass.loop.create_task(auto_lock())
+        self.hass.loop.create_task(auto_relock())
+
+    def _on_state(self, event):
+        if event.data.get("unlocked"):
+            self._state = True
+            self.schedule_update_ha_state()
 
     @property
     def is_locked(self):
         return not self._state
 
     async def async_open(self, **kwargs):
-        """开锁."""
         bus = self.hass.data[DOMAIN]["bus"]
         ok = await self.hass.async_add_executor_job(bus.unlock)
         if ok:

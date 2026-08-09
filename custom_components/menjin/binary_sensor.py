@@ -35,4 +35,4 @@ class MenjinBinary(BinarySensorEntity):
         elif self._key == "locked":
             if event.data.get("unlocked"):
                 self._attr_is_on = True
-        self.async_write_ha_state()
+        self.schedule_update_ha_state()
