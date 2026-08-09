@@ -31,15 +31,12 @@ UNLOCK34  = struct.pack("BB", 0x55, CMD_UNLOCK_ANS) + b"\x00\x01\x01" + b"\x00" 
 UNLOCK34 += struct.pack("B", sum(UNLOCK34) & 0xFF)
 
 def parse_frame(data: bytes) -> dict | None:
-    """解析 14 字节帧."""
+    """解析 14 字节帧 (不验证校验和, 主机ACK使用非标准校验算法)."""
     if len(data) < FRAME_LEN or data[0] != 0x55:
         return None
     cmd = data[1]
     payload = data[2:11]
     devid = data[11:13]
-    ck = data[13]
-    if sum(data[:13]) & 0xFF != ck:
-        return None
     return {"cmd": cmd, "payload": payload, "devid": devid, "raw": data}
 
 def parse_all(data: bytes) -> list[dict]:

@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.const import Platform
 
 from .const import (
-    DOMAIN, PORT, BAUD, READ_TIMEOUT, FRAME_LEN, parse_all,
+    DOMAIN, PORT, BAUD, READ_TIMEOUT, FRAME_LEN, parse_frame,
     CMD_CALL_START, CMD_ACK, CMD_UNLOCK_ANS, CMD_MONITOR, CMD_UNLOCK_F3,
     VIDEO_TIMEOUT, CALL_TIMEOUT,
     MONITOR, UNLOCK34,
