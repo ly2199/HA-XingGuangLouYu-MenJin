@@ -1,6 +1,4 @@
-"""星光楼宇 FME3 门禁控制器 HA 自定义集成。
-后台线程持续监听 RS485 总线, 实时追踪呼叫/视频/开锁状态。
-"""
+"""星光楼宇 FME3 门禁控制器 HA 自定义集成。"""
 import logging
 import threading
 import time
@@ -18,27 +16,30 @@ PLATFORMS = [Platform.LOCK, Platform.BUTTON, Platform.BINARY_SENSOR]
 
 
 async def async_setup(hass: HomeAssistant, config: dict):
-    """YAML 配置入口."""
-    if DOMAIN in hass.data and "bus" in hass.data[DOMAIN]:
+    """YAML 入口: 创建导入条目交给 config_flow 处理."""
+    if any(e.domain == DOMAIN for e in hass.config_entries.async_entries()):
         return True
-    entry = ConfigEntry(
-        domain=DOMAIN, data={}, source="import", version=1,
-        minor_version=1, discovery_keys={}, options={},
-        subentries_data=(), title="星光楼宇门禁", unique_id=f"{DOMAIN}_import",
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "import"}, data={}
+        )
     )
-    return await _init(hass, entry)
+    return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    """UI 配置入口."""
-    return await _init(hass, entry)
-
-async def _init(hass: HomeAssistant, entry: ConfigEntry):
+    """UI/导入配置入口."""
     hass.data.setdefault(DOMAIN, {})
     if "bus" not in hass.data[DOMAIN]:
-        hass.data[DOMAIN]["bus"] = MenjinBus(hass)
-        hass.data[DOMAIN]["bus"].start()
+        bus = MenjinBus(hass)
+        hass.data[DOMAIN]["bus"] = bus
+        bus.start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 class MenjinBus:
@@ -63,15 +64,22 @@ class MenjinBus:
         self._thread = threading.Thread(target=self._read_loop, daemon=True, name="MenjinBus")
         self._thread.start()
 
-    def _init_serial(self):
+    def _open_serial(self):
         import serial
-        self._ser = serial.Serial(PORT, BAUD, timeout=READ_TIMEOUT)
+        try:
+            self._ser = serial.Serial(PORT, BAUD, timeout=READ_TIMEOUT)
+            _LOGGER.info("串口 %s 已打开", PORT)
+        except Exception as e:
+            _LOGGER.warning("串口打开失败 (将每秒重试): %s", e)
+            self._ser = None
 
     def send(self, frame: bytes) -> bool:
         with self._lock:
             try:
                 if self._ser is None:
-                    self._init_serial()
+                    self._open_serial()
+                if self._ser is None:
+                    return False
                 self._ser.reset_input_buffer()
                 self._ser.write(frame)
                 self._ser.flush()
@@ -82,43 +90,40 @@ class MenjinBus:
                 return False
 
     def _read_loop(self):
-        self._init_serial()
+        self._open_serial()
         buf = bytearray()
-        _LOGGER.info("门禁总线监听启动 (%s @ %d)", PORT, BAUD)
+        _LOGGER.info("门禁总线监听启动")
         while self._running:
             try:
                 chunk = self._ser.read(128) if self._ser else b""
-            except Exception as e:
-                _LOGGER.warning("串口读错误: %s", e)
+            except Exception:
                 self._ser = None
                 time.sleep(1)
-                try:
-                    self._init_serial()
-                except Exception:
-                    continue
+                self._open_serial()
                 continue
-            if chunk:
-                buf += chunk
-                while len(buf) >= 14 and buf[0] == 0x55:
-                    parsed = parse_frame(buf[:14])
-                    if parsed:
-                        self._process_frame(parsed)
-                        buf = buf[14:]
-                    else:
-                        idx = buf.find(b"\x55", 1)
-                        if idx < 0:
-                            buf.clear()
-                            break
-                        buf = buf[idx:]
-                if len(buf) > 512:
-                    buf.clear()
+            if not chunk:
+                if self._ser is None:
+                    time.sleep(1)
+                    self._open_serial()
+                continue
+            buf += chunk
+            while len(buf) >= 14 and buf[0] == 0x55:
+                parsed = parse_frame(buf[:14])
+                if parsed:
+                    self._process_frame(parsed)
+                    buf = buf[14:]
+                else:
+                    idx = buf.find(b"\x55", 1)
+                    if idx < 0:
+                        buf.clear()
+                        break
+                    buf = buf[idx:]
+            if len(buf) > 512:
+                buf.clear()
 
     def _process_frame(self, parsed: dict):
         cmd = parsed["cmd"]
-        _LOGGER.debug("收到帧 cmd=0x%02x payload=%s", cmd, parsed["payload"].hex())
-        self.last_event = parsed
         new_states = {}
-
         if cmd == CMD_CALL_START:
             self.call_active = True
             new_states["call_active"] = True
@@ -135,20 +140,13 @@ class MenjinBus:
             self.unlocked = True
             self.unlock_time = time.time()
             new_states["unlocked"] = True
-
         if new_states:
             self.hass.loop.call_soon_threadsafe(
                 lambda: self.hass.bus.async_fire(f"{DOMAIN}_state_change", new_states)
             )
 
     def monitor(self) -> bool:
-        self.send(MONITOR)
-        time.sleep(0.5)
-        try:
-            d = self._ser.read(128) if self._ser else b""
-            return d and parse_frame(d) is not None
-        except Exception:
-            return False
+        return self.send(MONITOR)
 
     def unlock(self) -> bool:
         self.send(MONITOR)
