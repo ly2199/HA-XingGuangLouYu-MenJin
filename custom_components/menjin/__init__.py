@@ -60,7 +60,6 @@ class MenjinBus:
         # 帧日志
         self._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menjin_frames")
         try:
-            import os
             os.makedirs(self._log_dir, exist_ok=True)
         except Exception:
             self._log_dir = None
