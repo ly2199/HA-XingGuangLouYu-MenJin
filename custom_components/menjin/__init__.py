@@ -21,26 +21,23 @@ async def async_setup(hass: HomeAssistant, config: dict):
     """YAML 配置入口."""
     if DOMAIN in hass.data and "bus" in hass.data[DOMAIN]:
         return True
-    return await _init(hass, entry=None)
+    entry = ConfigEntry(
+        domain=DOMAIN, data={}, source="import", version=1,
+        minor_version=1, discovery_keys={}, options={},
+        subentries_data=(), title="星光楼宇门禁", unique_id=f"{DOMAIN}_import",
+    )
+    return await _init(hass, entry)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """UI 配置入口."""
-    return await _init(hass, entry=entry)
+    return await _init(hass, entry)
 
-async def _init(hass: HomeAssistant, entry: ConfigEntry | None):
+async def _init(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
     if "bus" not in hass.data[DOMAIN]:
         hass.data[DOMAIN]["bus"] = MenjinBus(hass)
         hass.data[DOMAIN]["bus"].start()
-    if entry is not None:
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    else:
-        for platform in PLATFORMS:
-            hass.async_create_task(
-                hass.helpers.discovery.async_load_platform(
-                    platform, DOMAIN, {}, {}
-                )
-            )
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
@@ -149,12 +146,9 @@ class MenjinBus:
         time.sleep(0.5)
         try:
             d = self._ser.read(128) if self._ser else b""
-            if d:
-                parsed = parse_frame(d)
-                return parsed is not None
+            return d and parse_frame(d) is not None
         except Exception:
-            pass
-        return False
+            return False
 
     def unlock(self) -> bool:
         self.send(MONITOR)
