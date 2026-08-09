@@ -1,4 +1,4 @@
-"""门禁锁实体 — 官方 LockEntity API 对齐。"""
+"""门禁锁实体 — HA 2026.8 LockEntity 对齐。"""
 import asyncio
 import time
 import logging
@@ -26,8 +26,7 @@ class MenjinLock(LockEntity):
         self._attr_unique_id = f"{DOMAIN}_lock"
         self._bus = hass.data[DOMAIN]["bus"]
         self._unlock_time = 0.0
-        self._attr_is_locked = True  # 使用官方 _attr_is_locked
-
+        self._attr_is_locked = True
         hass.bus.async_listen(f"{DOMAIN}_state_change", self._on_unlocked)
 
         async def auto_relock():
@@ -38,15 +37,17 @@ class MenjinLock(LockEntity):
                     self.async_write_ha_state()
         self.hass.loop.create_task(auto_relock())
 
+    @property
+    def is_locked(self):
+        return self._attr_is_locked
+
     def _on_unlocked(self, event):
-        """收到开锁事件 — 线程安全回调。"""
         if event.data.get("unlocked"):
             self._unlock_time = time.time()
             self._attr_is_locked = False
             self.schedule_update_ha_state()
 
     def unlock(self, **kwargs):
-        """HA 框架在 executor 线程中调用此方法。"""
         self._unlock_time = time.time()
         if self._bus.video_active or self._bus.call_active:
             _LOGGER.info("开锁: 通话/视频中 → 直接 0x34")
