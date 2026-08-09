@@ -20,8 +20,8 @@ CMD_HANGUP     = 0x3a  # 挂机 (实际未观测到)
 CMD_UNLOCK_F3  = 0xf3  # 通话中开锁状态
 
 # 状态超时 (秒)
-VIDEO_TIMEOUT  = 120  # 视频通道无活动后超时关闭
-CALL_TIMEOUT   = 120  # 通话无活动后超时关闭
+VIDEO_TIMEOUT  = 15  # 视频通道无活动后超时关闭
+CALL_TIMEOUT   = 15  # 通话无活动后超时关闭
 
 # 预定义帧
 MONITOR   = struct.pack("BB", 0x55, CMD_MONITOR) + b"\x00" * 9 + DEVICE_ID

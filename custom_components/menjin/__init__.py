@@ -4,6 +4,7 @@
 - 忽略非 0x55 乱码
 """
 import logging
+import os
 import threading
 import time
 
@@ -56,6 +57,13 @@ class MenjinBus:
         self._last_call_event = 0.0
         # 状态变更节流
         self._last_fire = 0.0
+        # 帧日志
+        self._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menjin_frames")
+        try:
+            import os
+            os.makedirs(self._log_dir, exist_ok=True)
+        except Exception:
+            self._log_dir = None
 
     def start(self):
         if self._running:
@@ -110,6 +118,7 @@ class MenjinBus:
                     time.sleep(1)
                     self._open_serial()
                 continue
+            self._log_raw(chunk)
 
             # 解析所有帧
             for parsed in parse_all(chunk):
@@ -158,6 +167,20 @@ class MenjinBus:
         self._last_fire = now
         self.hass.loop.call_soon_threadsafe(
             lambda: self.hass.bus.async_fire(f"{DOMAIN}_state_change", dict(states)))
+
+    def _log_raw(self, data: bytes):
+        if not self._log_dir:
+            return
+        try:
+            import datetime
+            today = datetime.date.today().isoformat()
+            path = f"{self._log_dir}/{today}.log"
+            ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            line = f"{ts} {data.hex(' ')}\n"
+            with open(path, "a") as f:
+                f.write(line)
+        except Exception:
+            pass
 
     def _timeout_loop(self):
         while self._running:
