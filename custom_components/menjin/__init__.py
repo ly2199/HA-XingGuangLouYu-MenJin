@@ -120,11 +120,22 @@ class MenjinBus:
                     self._open_serial()
                 continue
             self._log_raw(chunk)
+            buf += chunk
 
-            # 解析所有帧
-            for parsed in parse_all(chunk):
-                self._process_frame(parsed)
-            if len(buf) > 1024:
+            # 从缓冲区解析帧, 移除已消费字节
+            consumed = 0
+            while consumed + FRAME_LEN <= len(buf):
+                parsed = parse_frame(bytes(buf[consumed:consumed + FRAME_LEN]))
+                if parsed:
+                    self._process_frame(parsed)
+                    consumed += FRAME_LEN
+                else:
+                    nxt = buf.find(b"\x55", consumed + 1)
+                    consumed = nxt if nxt >= 0 else len(buf)
+                    break
+            if consumed > 0:
+                buf = buf[consumed:]
+            if len(buf) > 512:
                 buf.clear()
 
     def _process_frame(self, parsed):
