@@ -1,6 +1,4 @@
 {
   "name": "星光楼宇门禁 (FME3)",
-  "render_readme": true,
-  "country": "CN",
-  "domains": ["lock", "button", "binary_sensor"]
+  "render_readme": true
 }
