@@ -55,8 +55,6 @@ class MenjinBus:
         # 超时追踪
         self._last_video_event = 0.0
         self._last_call_event = 0.0
-        # 状态变更节流
-        self._last_fire = 0.0
         # 帧日志
         self._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menjin_frames")
         try:
@@ -68,9 +66,13 @@ class MenjinBus:
         if self._running:
             return
         self._running = True
+        self._open_serial()
+        if self._ser:
+            _LOGGER.info("串口 %s 已就绪，总线监听启动", PORT)
+        else:
+            _LOGGER.error("串口 %s 不可用", PORT)
         self._thread = threading.Thread(target=self._read_loop, daemon=True, name="MenjinBus")
         self._thread.start()
-        # 超时检查线程
         self._timeout_thread = threading.Thread(
             target=self._timeout_loop, daemon=True, name="MenjinTimeout")
         self._timeout_thread.start()
@@ -127,6 +129,7 @@ class MenjinBus:
 
     def _process_frame(self, parsed):
         cmd = parsed["cmd"]
+        _LOGGER.info("收到帧 cmd=0x%02x", cmd)
         now = time.time()
         new = {}
 
@@ -160,10 +163,7 @@ class MenjinBus:
             self._fire(new)
 
     def _fire(self, states):
-        now = time.time()
-        if now - self._last_fire < 0.5:
-            return  # 节流
-        self._last_fire = now
+        _LOGGER.info("状态变更: %s", states)
         self.hass.loop.call_soon_threadsafe(
             lambda: self.hass.bus.async_fire(f"{DOMAIN}_state_change", dict(states)))
 
