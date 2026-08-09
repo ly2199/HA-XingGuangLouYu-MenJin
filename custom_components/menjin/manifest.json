@@ -1,0 +1,11 @@
+{
+  "domain": "menjin",
+  "name": "星光楼宇门禁",
+  "version": "1.0.0",
+  "documentation": "https://github.com/user/menjin",
+  "requirements": [],
+  "codeowners": ["@user"],
+  "iot_class": "local_push",
+  "integration_type": "device",
+  "config_flow": true
+}

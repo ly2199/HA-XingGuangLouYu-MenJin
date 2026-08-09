@@ -1,0 +1,34 @@
+{
+  "title": "星光楼宇门禁",
+  "config": {
+    "abort": {
+      "single_instance_allowed": "只允许一个实例"
+    }
+  },
+  "entity": {
+    "lock": {
+      "menjin_lock": {
+        "name": "门禁锁"
+      }
+    },
+    "button": {
+      "menjin_monitor": {
+        "name": "监视"
+      },
+      "menjin_unlock": {
+        "name": "开锁(通话中)"
+      }
+    },
+    "binary_sensor": {
+      "menjin_call": {
+        "name": "来电呼叫"
+      },
+      "menjin_video": {
+        "name": "视频通道"
+      },
+      "menjin_locked": {
+        "name": "已开锁"
+      }
+    }
+  }
+}
