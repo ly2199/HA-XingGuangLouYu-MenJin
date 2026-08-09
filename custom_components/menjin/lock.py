@@ -26,13 +26,13 @@ class MenjinLock(LockEntity):
         self._attr_unique_id = f"{DOMAIN}_lock"
         self._attr_name = None
         self._state = False
-        bus = hass.data[DOMAIN]["bus"]
+        self._bus = hass.data[DOMAIN]["bus"]
         hass.bus.async_listen(f"{DOMAIN}_state_change", self._on_state)
 
         async def auto_relock():
             while True:
                 await asyncio.sleep(1)
-                if self._state and time.time() - bus.unlock_time > 3:
+                if self._state and time.time() - self._bus.unlock_time > 3:
                     self._state = False
                     self.async_write_ha_state()
         self.hass.loop.create_task(auto_relock())
@@ -47,8 +47,11 @@ class MenjinLock(LockEntity):
         return not self._state
 
     async def async_open(self, **kwargs):
-        bus = self.hass.data[DOMAIN]["bus"]
-        ok = await self.hass.async_add_executor_job(bus.unlock)
-        if ok:
-            self._state = True
-            self.async_write_ha_state()
+        if self._bus.video_active or self._bus.call_active:
+            _LOGGER.info("开锁: 通话/视频中, 直接发 0x34")
+            ok = await self.hass.async_add_executor_job(self._bus.unlock_call)
+        else:
+            _LOGGER.info("开锁: 先建立监视, 再发 0x34")
+            ok = await self.hass.async_add_executor_job(self._bus.unlock)
+        self._state = ok
+        self.async_write_ha_state()
