@@ -76,12 +76,32 @@ ID_POS = {
 # 0x3a 需要双位置尝试 (6-7 多数, 11-12 少数)
 HANGUP_ALT_POS = (11, 2)
 
-# ── 预定义帧 ────────────────────────────────────────────
-MONITOR   = struct.pack("BB", 0x55, CMD_MONITOR) + b"\x00" * 9 + DEVICE_ID
-MONITOR  += struct.pack("B", sum(MONITOR) & 0xFF)
+# ── 校验和 ──────────────────────────────────────────────
+def calc_checksum(data: bytes) -> int:
+    """8 位累加和 (模 256): 从 0x55 到校验前一个字节累加, 取低 8 位.
 
-UNLOCK34  = struct.pack("BB", 0x55, CMD_UNLOCK) + b"\x00\x01\x01" + b"\x00" * 6 + DEVICE_ID
-UNLOCK34 += struct.pack("B", sum(UNLOCK34) & 0xFF)
+    PROTOCOL.md v2.2 §2.4: 已确认 0x32/0x34 使用此算法.
+    """
+    return sum(data) & 0xFF
+
+
+def validate_checksum(frame: bytes) -> bool:
+    """校验完整 14B/13B 帧 (最后一个字节为校验)."""
+    if len(frame) < 2:
+        return False
+    return calc_checksum(frame[:-1]) == frame[-1]
+
+
+# ── 预定义帧 ────────────────────────────────────────────
+def _build(cmd: int, payload: bytes) -> bytes:
+    """构造 14B 帧: 55 cmd payload(9B) devid 校验(8位累加和)."""
+    frame = struct.pack("BB", 0x55, cmd) + payload.ljust(9, b"\x00") + DEVICE_ID
+    return frame + struct.pack("B", calc_checksum(frame))
+
+
+MONITOR = _build(CMD_MONITOR, b"")
+UNLOCK34 = _build(CMD_UNLOCK, b"\x00\x01\x01")
+ANSWER = _build(CMD_ANSWER, b"\x00\x01\x01")  # 接听指令 (模拟室内机摘机)
 
 # ── 超时常量 ────────────────────────────────────────────
 VIDEO_TIMEOUT = 15   # 视频通道无活动后超时关闭

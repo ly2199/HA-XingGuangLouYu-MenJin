@@ -22,8 +22,8 @@ from .const import (
     try_parse_frame, try_parse_frame_13, parse_device_id,
     CMD_ACK, CMD_UNLOCK, CMD_MONITOR, CMD_UNLOCK_F3, CMD_RING,
     CMD_HANGUP, CMD_ANSWER, CMD_CALL_START, CMD_TIMEOUT, CMD_AMBIGUOUS,
-    CMD_NAMES, ACCEPT_HEADS, DROP_HEADS,
-    VIDEO_TIMEOUT, CALL_TIMEOUT, MONITOR, UNLOCK34, DEVICE_ID,
+    CMD_NAMES, ACCEPT_HEADS, DROP_HEADS, validate_checksum,
+    VIDEO_TIMEOUT, CALL_TIMEOUT, MONITOR, UNLOCK34, ANSWER, DEVICE_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -199,6 +199,10 @@ class MenjinBus:
                 if parsed is None and len(buf) >= FRAME_LEN_13:
                     parsed = try_parse_frame_13(bytes(buf[:FRAME_LEN_13]))
                 if parsed is not None:
+                    # 校验标记: 0x32/0x34 干净帧高置信; 校验失败多为位翻转干扰, 仍接受但计数
+                    parsed["checksum_ok"] = validate_checksum(parsed["raw"])
+                    if not parsed["checksum_ok"]:
+                        parsed["suspect"] = True
                     self._process_frame(parsed)
                     n = FRAME_LEN if len(parsed["raw"]) == FRAME_LEN else FRAME_LEN_13
                     consumed += n
@@ -420,6 +424,13 @@ class MenjinBus:
     def unlock_call(self) -> bool:
         """通话/视频中开锁."""
         return self.send(UNLOCK34)
+
+    def answer(self) -> bool:
+        """模拟室内机接听: 发送 0x33 接听指令 (用于远程接听访客呼叫).
+
+        仅在主机呼叫本机时有效 (0x33 帧 ID 必须匹配被叫分机).
+        """
+        return self.send(ANSWER)
 
     def stats(self) -> dict:
         return {

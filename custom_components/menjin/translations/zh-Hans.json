@@ -43,6 +43,9 @@
       },
       "menjin_unlock": {
         "name": "开锁(通话中)"
+      },
+      "menjin_answer": {
+        "name": "接听"
       }
     },
     "binary_sensor": {

@@ -3,7 +3,7 @@ from homeassistant.components.button import ButtonEntity
 from .const import DOMAIN
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    async_add_entities([MonitorButton(hass), UnlockButton(hass)])
+    async_add_entities([MonitorButton(hass), UnlockButton(hass), AnswerButton(hass)])
 
 class _Base(ButtonEntity):
     _attr_has_entity_name = True
@@ -35,3 +35,17 @@ class UnlockButton(_Base):
 
     async def async_press(self):
         await self.hass.async_add_executor_job(self._bus.unlock_call)
+
+
+class AnswerButton(_Base):
+    """接听按钮: 发送 0x33 模拟室内机接听 (访客呼叫时远程接听)."""
+
+    _attr_unique_id = f"{DOMAIN}_answer"
+    _attr_name = "接听"
+    _attr_icon = "mdi:phone-in-talk"
+
+    def __init__(self, hass):
+        self._bus = hass.data[DOMAIN]["bus"]
+
+    async def async_press(self):
+        await self.hass.async_add_executor_job(self._bus.answer)
