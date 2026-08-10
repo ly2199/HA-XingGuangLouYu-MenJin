@@ -1,15 +1,19 @@
-"""状态传感器: 来电呼叫 / 视频通道 / 锁状态。"""
+"""状态传感器: 来电呼叫 / 视频通道 / 已开锁 / 已接听."""
 import asyncio
 import time
+
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from .const import DOMAIN
+
 
 async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities([
         MenjinBinary("call", "来电呼叫", "mdi:phone-incoming"),
         MenjinBinary("video", "视频通道", "mdi:video"),
         MenjinBinary("locked", "已开锁", "mdi:lock-open", reset_after=5),
+        MenjinBinary("answered", "已接听", "mdi:phone-check", reset_after=30),
     ])
+
 
 class MenjinBinary(BinarySensorEntity):
     _attr_has_entity_name = True
@@ -49,6 +53,10 @@ class MenjinBinary(BinarySensorEntity):
             self._attr_is_on = event.data.get("call_active", False)
         elif self._key == "video":
             self._attr_is_on = event.data.get("video_active", False)
+        elif self._key == "answered":
+            self._attr_is_on = event.data.get("answered", False)
+            if self._attr_is_on:
+                self._reset_time = time.time()
         elif self._key == "locked":
             if event.data.get("unlocked"):
                 self._attr_is_on = True

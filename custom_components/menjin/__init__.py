@@ -1,6 +1,11 @@
-"""星光楼宇 FME3 门禁控制器 HA 自定义集成。
-后台线程持续监听 RS485 总线, 实时追踪呼叫/视频/开锁状态。
-仅处理发给本分机(房间号/设备ID)的帧, 忽略其他分机的活动。
+"""星光楼宇 FME3 门禁控制器 HA 自定义集成 (v2 协议支持).
+
+基于 PROTOCOL.md v2.1:
+- 帧头/命令字节容错 (位翻转干扰还原)
+- 13B 变体帧解析 + 跨 read 拼接
+- 点名帧按设备ID过滤 (邻居活动不误触发)
+- 流程状态机: 呼叫→振铃→[接听]→开锁→挂机, 幂等处理重复帧
+- 完整总线日志 (R/T 方向) + 1小时心跳
 """
 import datetime
 import logging
@@ -13,15 +18,23 @@ from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_DEVICE_ID, Platform
 
 from .const import (
-    DOMAIN, PORT, BAUD, READ_TIMEOUT, FRAME_LEN, parse_frame, parse_device_id,
-    CMD_ACK, CMD_UNLOCK_ANS, CMD_MONITOR, CMD_UNLOCK_F3,
-    CMD_RING, CMD_HANGUP, TARGETED_CMDS,
-    VIDEO_TIMEOUT, CALL_TIMEOUT,
-    MONITOR, UNLOCK34, DEVICE_ID,
+    DOMAIN, PORT, BAUD, READ_TIMEOUT, FRAME_LEN, FRAME_LEN_13,
+    try_parse_frame, try_parse_frame_13, parse_device_id,
+    CMD_ACK, CMD_UNLOCK, CMD_MONITOR, CMD_UNLOCK_F3, CMD_RING,
+    CMD_HANGUP, CMD_ANSWER, CMD_CALL_START, CMD_TIMEOUT, CMD_AMBIGUOUS,
+    CMD_NAMES, ACCEPT_HEADS, DROP_HEADS,
+    VIDEO_TIMEOUT, CALL_TIMEOUT, MONITOR, UNLOCK34, DEVICE_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.LOCK, Platform.BUTTON, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.LOCK, Platform.BUTTON, Platform.BINARY_SENSOR,
+             Platform.SENSOR, Platform.EVENT]
+
+# 幂等窗口 (秒)
+RING_DEBOUNCE = 3.0      # 双振铃/重复振铃
+UNLOCK_DEBOUNCE = 5.0    # 重复开锁帧
+HANGUP_DEBOUNCE = 2.0    # 重复挂机
+HEARTBEAT_INTERVAL = 3600  # 心跳间隔: 1 小时
 
 
 async def async_setup(hass: HomeAssistant, config: dict):
@@ -38,13 +51,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         devid_text = entry.data.get(
             CONF_DEVICE_ID, entry.options.get(CONF_DEVICE_ID, DEVICE_ID.hex()))
         device_id = parse_device_id(devid_text) or DEVICE_ID
-        _LOGGER.info("门禁插件启动, 本机房间号=%s (devid=%s)",
-                     device_id.hex(), device_id.hex())
+        _LOGGER.info("门禁插件启动, 本机房间号=%s", device_id.hex())
         bus = MenjinBus(hass, device_id)
         hass.data[DOMAIN]["bus"] = bus
         bus.start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    # 选项(房间号)修改后自动重载, 让新配置立即生效
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
@@ -62,41 +73,51 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 
 class MenjinBus:
-    """串口总线读写器 (后台线程)."""
+    """串口总线读写器 + 协议状态机 (后台线程)."""
 
     def __init__(self, hass: HomeAssistant, device_id: bytes):
         self.hass = hass
-        self.device_id = device_id  # 本机分机号 (如 b'\x16\x02' = 1602)
+        self.device_id = device_id
         self._thread: threading.Thread | None = None
         self._timeout_thread: threading.Thread | None = None
         self._running = False
         self._ser = None
         self._lock = threading.Lock()
+        # 状态
         self.call_active = False
         self.video_active = False
+        self.answered = False
         self.unlocked = False
         self.unlock_time = 0.0
         self._last_video_event = 0.0
         self._last_call_event = 0.0
-        # 采集统计 (供心跳日志/完整性验证)
-        self._rx_bytes = 0          # 累计接收字节
-        self._tx_bytes = 0          # 累计发送字节
-        self._parsed_frames = 0     # 累计解析出的有效帧 (含被过滤的邻居帧)
-        self._last_rx_time = 0.0    # 最近一次收到数据的时间
-        self._last_heartbeat = 0.0  # 最近一次心跳时间
+        self._last_ring_time = 0.0
+        self._last_hangup_time = 0.0
+        self._last_event = "无"
+        self._last_event_time = 0.0
+        self._last_caller = ""
+        # 统计
+        self._rx_bytes = 0
+        self._tx_bytes = 0
+        self._parsed_frames = 0
+        self._suspect_frames = 0    # 干扰帧 (命令字节还原/13B)
+        self._dropped_bytes = 0     # 丢弃字节
+        self._last_rx_time = 0.0
+        self._last_heartbeat = 0.0
         self._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menjin_frames")
         try:
             os.makedirs(self._log_dir, exist_ok=True)
         except Exception:
             self._log_dir = None
 
+    # ── 生命周期 ────────────────────────────────────────
     def start(self):
         if self._running:
             return
         self._running = True
         self._open_serial()
         if self._ser:
-            _LOGGER.info("串口 %s 已就绪，总线监听启动 (本机 %s)", PORT, self.device_id.hex())
+            _LOGGER.info("串口 %s 已就绪, 总线监听启动 (本机 %s)", PORT, self.device_id.hex())
         else:
             _LOGGER.error("串口 %s 不可用", PORT)
         self._thread = threading.Thread(target=self._read_loop, daemon=True, name="MenjinBus")
@@ -118,7 +139,6 @@ class MenjinBus:
         import serial
         try:
             self._ser = serial.Serial(PORT, BAUD, timeout=READ_TIMEOUT)
-            # 清空串口残留缓冲, 保证日志从干净起点开始记录
             self._ser.reset_input_buffer()
             self._ser.reset_output_buffer()
             _LOGGER.info("串口 %s 已打开", PORT)
@@ -135,13 +155,14 @@ class MenjinBus:
                     return False
                 self._ser.write(frame)
                 self._ser.flush()
-                self._log_raw(frame, "T")  # 发送帧也完整记录
+                self._log_raw(frame, "T")
                 return True
             except Exception as e:
                 _LOGGER.error("发送失败: %s", e)
                 self._ser = None
                 return False
 
+    # ── 读取与帧解析 (容错 + 拼接) ─────────────────────
     def _read_loop(self):
         self._open_serial()
         buf = bytearray()
@@ -163,82 +184,167 @@ class MenjinBus:
             buf += chunk
 
             consumed = 0
-            while consumed + FRAME_LEN <= len(buf):
-                parsed = parse_frame(bytes(buf[consumed:consumed + FRAME_LEN]))
-                if parsed:
+            while len(buf) >= FRAME_LEN_13:
+                b0 = buf[0]
+                if b0 in DROP_HEADS or b0 not in ACCEPT_HEADS:
+                    # 无效帧头: 丢弃 1 字节继续找
+                    buf.pop(0)
+                    consumed += 1
+                    self._dropped_bytes += 1
+                    continue
+                # 优先尝试 14B
+                parsed = None
+                if len(buf) >= FRAME_LEN:
+                    parsed = try_parse_frame(bytes(buf[:FRAME_LEN]))
+                if parsed is None and len(buf) >= FRAME_LEN_13:
+                    parsed = try_parse_frame_13(bytes(buf[:FRAME_LEN_13]))
+                if parsed is not None:
                     self._process_frame(parsed)
-                    consumed += FRAME_LEN
-                else:
-                    nxt = buf.find(b"\x55", consumed + 1)
-                    consumed = nxt if nxt >= 0 else len(buf)
-                    break
+                    n = FRAME_LEN if len(parsed["raw"]) == FRAME_LEN else FRAME_LEN_13
+                    consumed += n
+                    del buf[:n]
+                    continue
+                # 解析失败: 帧头可能为伪帧头, 丢弃 1 字节
+                buf.pop(0)
+                consumed += 1
+                self._dropped_bytes += 1
             if consumed > 0:
                 buf = buf[consumed:]
-            if len(buf) > 512:
+            if len(buf) > 1024:
                 buf.clear()
 
+    # ── 状态机 ──────────────────────────────────────────
     def _process_frame(self, parsed: dict):
         cmd = parsed["cmd"]
         devid = parsed["devid"]
-        self._parsed_frames += 1  # 统计总线上所有有效帧 (含被过滤的邻居帧)
+        devid2 = parsed.get("devid2")
+        self._parsed_frames += 1
+        if parsed.get("suspect"):
+            self._suspect_frames += 1
         now = time.time()
         new = {}
+        me = self.device_id
 
-        # 点名帧: 必须发给本机(房间号)才处理, 忽略邻居分机的振铃/开锁
-        if cmd in TARGETED_CMDS and devid != self.device_id:
-            _LOGGER.debug("忽略非本机点名帧 cmd=0x%02x devid=%s (本机=%s)",
-                          cmd, devid.hex(), self.device_id.hex())
-            return
+        # 广播/点名判定: 点名帧必须匹配本机
+        is_me = devid == me or (devid2 is not None and devid2 == me)
 
         if cmd == CMD_MONITOR:
-            pass  # 监视请求回显, 状态由主机的 ACK 帧确认
+            # 监视请求回显, 状态由主机 ACK 确认
+            pass
+
+        elif cmd == CMD_CALL_START:
+            # 0x30 呼叫 (点名帧): 只有呼叫本机才触发
+            if is_me:
+                if not self.call_active:
+                    self.call_active = True
+                    new["call_active"] = True
+                if not self.video_active:
+                    self.video_active = True
+                    new["video_active"] = True
+                self._last_call_event = now
+                self._last_video_event = now
+                self._set_last("呼叫本机", devid.hex() if devid == me else devid2.hex())
+                self._fire_event("call", caller=(devid.hex() if devid == me else devid2.hex()))
+
         elif cmd == CMD_RING:
-            # 点名振铃: 确认呼叫到达本机
-            if not self.call_active:
+            # 0x32 振铃 (点名帧): 本机才触发, 双振铃幂等
+            if devid == me:
+                if now - self._last_ring_time < RING_DEBOUNCE:
+                    return  # 双振铃, 忽略第二次
+                self._last_ring_time = now
                 self.call_active = True
+                self.video_active = True
                 new["call_active"] = True
-            if not self.video_active:
-                self.video_active = True
                 new["video_active"] = True
-            self._last_call_event = now
-            self._last_video_event = now
+                self._last_call_event = now
+                self._last_video_event = now
+                self._set_last("来电振铃", devid.hex())
+                self._fire_event("ring", caller=devid.hex())
+
+        elif cmd == CMD_ANSWER:
+            # 0x33 接听 (点名帧): 本机接听; 挂机后出现则忽略
+            if devid == me:
+                if now - self._last_hangup_time < HANGUP_DEBOUNCE:
+                    return  # 0x3a 之后出现, 边界忽略
+                if not self.answered:
+                    self.answered = True
+                    new["answered"] = True
+                self._set_last("接听", devid.hex())
+                self._fire_event("answer", caller=devid.hex())
+
         elif cmd == CMD_ACK:
-            # 主机应答(广播): 监视/视频通道建立确认
-            if not self.video_active:
-                self.video_active = True
-                new["video_active"] = True
-            self._last_video_event = now
+            # 0x39 主机应答 (点名帧, ID@6-7): 本机监视确认
+            if devid == me:
+                if not self.video_active:
+                    self.video_active = True
+                    new["video_active"] = True
+                self._last_video_event = now
+                self._fire_event("video", caller=devid.hex())
+
         elif cmd == CMD_HANGUP:
-            # 挂机(广播): 立即结束呼叫/视频, 无需等待超时
-            if self.call_active or self.video_active:
+            # 0x3a/0x3e 挂机 (广播): 流程结束, 复位状态
+            if (self.call_active or self.video_active or self.answered):
+                if now - self._last_hangup_time < HANGUP_DEBOUNCE:
+                    return
+                self._last_hangup_time = now
                 self.call_active = False
                 self.video_active = False
                 new["call_active"] = False
                 new["video_active"] = False
-                _LOGGER.debug("收到挂机, 呼叫/视频结束")
-        elif cmd in (CMD_UNLOCK_ANS, CMD_UNLOCK_F3):
-            # 点名开锁: 只有本机开锁才置位
-            self.unlocked = True
-            self.unlock_time = now
-            new["unlocked"] = True
-            self._last_video_event = now
+                if self.answered:
+                    self.answered = False
+                    new["answered"] = False
+                self._set_last("挂机", devid.hex() if devid != b"\x00\x00" else "")
+                self._fire_event("hangup", caller=devid.hex())
+
+        elif cmd in (CMD_UNLOCK, CMD_UNLOCK_F3):
+            # 0x34/0xf3 开锁 (点名帧): 本机开锁; 重复帧幂等
+            if devid == me:
+                if self.unlocked and now - self.unlock_time < UNLOCK_DEBOUNCE:
+                    return  # 重复开锁帧, 忽略
+                self.unlocked = True
+                self.unlock_time = now
+                new["unlocked"] = True
+                self._last_video_event = now
+                self._set_last("开锁", devid.hex())
+                self._fire_event("unlock", caller=devid.hex())
+
+        elif cmd == CMD_TIMEOUT:
+            # 0x9a 呼叫超时: 仅记录事件, 不驱动状态
+            if is_me:
+                self._set_last("呼叫超时", devid.hex())
+                self._fire_event("timeout", caller=devid.hex())
+
         else:
-            _LOGGER.debug("未处理命令 cmd=0x%02x devid=%s", cmd, devid.hex())
+            _LOGGER.debug("未处理命令 0x%02x devid=%s", cmd, devid.hex())
 
         if new:
-            self._fire(new)
+            self._fire_state(new)
 
-    def _fire(self, states: dict):
+    # ── 事件/状态分发 ───────────────────────────────────
+    def _set_last(self, text: str, caller: str):
+        self._last_event = text
+        self._last_event_time = time.time()
+        self._last_caller = caller
+
+    def _fire_state(self, states: dict):
         _LOGGER.debug("状态变更: %s", states)
         self.hass.loop.call_soon_threadsafe(
             lambda: self.hass.bus.async_fire(f"{DOMAIN}_state_change", dict(states)))
 
-    def _log_raw(self, data: bytes, direction: str = "R"):
-        """记录总线原始字节流 (完整记录: 标准帧/非标准帧/碎片/噪声 全部保留).
+    def _fire_event(self, event_type: str, caller: str = ""):
+        """门禁事件 (供 event 实体 / 自动化使用)."""
+        data = {
+            "type": event_type,
+            "caller": caller,
+            "time": time.time(),
+            "event": self._last_event,
+        }
+        self.hass.loop.call_soon_threadsafe(
+            lambda: self.hass.bus.async_fire(f"{DOMAIN}_event", dict(data)))
 
-        direction: "R" = 接收 (总线 -> 本机), "T" = 发送 (本机 -> 总线)
-        每行 = 一次串口读写返回的原始数据, 毫秒时间戳, 不丢任何字节.
-        """
+    # ── 日志 ────────────────────────────────────────────
+    def _log_raw(self, data: bytes, direction: str = "R"):
         if direction == "R":
             self._rx_bytes += len(data)
             self._last_rx_time = time.time()
@@ -253,15 +359,11 @@ class MenjinBus:
             line = f"{ts} {direction} {data.hex(' ')}\n"
             with open(path, "a") as f:
                 f.write(line)
-                f.flush()  # 立即落盘, 防止进程异常退出时丢失日志
+                f.flush()
         except Exception:
             pass
 
     def _log_heartbeat(self):
-        """每 5 分钟写一条心跳, 证明采集线程持续工作.
-
-        用于区分"总线静默(无数据)"与"采集故障(线程死/串口断)".
-        """
         if not self._log_dir:
             return
         try:
@@ -274,14 +376,16 @@ class MenjinBus:
                 idle = f"距上次R数据 {idle_min} 分钟"
             else:
                 idle = "尚未收到任何数据"
-            line = (f"{ts} H 心跳:监听中 累计R={self._rx_bytes}B "
-                    f"T={self._tx_bytes}B 帧={self._parsed_frames} | {idle}\n")
+            line = (f"{ts} H 心跳:监听中 累计R={self._rx_bytes}B T={self._tx_bytes}B "
+                    f"帧={self._parsed_frames} 干扰={self._suspect_frames} "
+                    f"丢弃={self._dropped_bytes}B | {idle}\n")
             with open(path, "a") as f:
                 f.write(line)
                 f.flush()
         except Exception:
             pass
 
+    # ── 超时与心跳 ──────────────────────────────────────
     def _timeout_loop(self):
         while self._running:
             time.sleep(5)
@@ -293,18 +397,21 @@ class MenjinBus:
             if self.call_active and now - self._last_call_event > CALL_TIMEOUT:
                 self.call_active = False
                 new["call_active"] = False
+            if self.answered and now - self._last_call_event > CALL_TIMEOUT:
+                self.answered = False
+                new["answered"] = False
             if new:
-                self._fire(new)
-            # 心跳: 每 300 秒写一条监听状态, 证明采集线程持续工作
-            if now - self._last_heartbeat >= 300:
+                self._fire_state(new)
+            if now - self._last_heartbeat >= HEARTBEAT_INTERVAL:
                 self._last_heartbeat = now
                 self._log_heartbeat()
 
+    # ── 对外操作 ────────────────────────────────────────
     def monitor(self) -> bool:
         return self.send(MONITOR)
 
     def unlock(self) -> bool:
-        """空闲开锁: 先监视建立通道, 再发开锁. 状态由总线事件驱动."""
+        """空闲开锁: 先监视建立通道, 再发开锁."""
         ok = self.send(MONITOR)
         time.sleep(1)
         ok = self.send(UNLOCK34) and ok
@@ -313,3 +420,15 @@ class MenjinBus:
     def unlock_call(self) -> bool:
         """通话/视频中开锁."""
         return self.send(UNLOCK34)
+
+    def stats(self) -> dict:
+        return {
+            "rx_bytes": self._rx_bytes,
+            "tx_bytes": self._tx_bytes,
+            "frames": self._parsed_frames,
+            "suspect_frames": self._suspect_frames,
+            "dropped_bytes": self._dropped_bytes,
+            "last_event": self._last_event,
+            "last_caller": self._last_caller,
+            "last_event_time": self._last_event_time,
+        }

@@ -54,6 +54,35 @@
       },
       "menjin_locked": {
         "name": "已开锁"
+      },
+      "menjin_answered": {
+        "name": "已接听"
+      }
+    },
+    "sensor": {
+      "menjin_last_event": {
+        "name": "最后事件"
+      },
+      "menjin_bus_stats": {
+        "name": "总线统计"
+      }
+    },
+    "event": {
+      "menjin_event": {
+        "name": "门禁事件",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "call": "呼叫",
+              "ring": "振铃",
+              "answer": "接听",
+              "unlock": "开锁",
+              "hangup": "挂机",
+              "video": "视频建立",
+              "timeout": "呼叫超时"
+            }
+          }
+        }
       }
     }
   }
