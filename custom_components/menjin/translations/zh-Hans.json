@@ -1,8 +1,34 @@
 {
   "title": "星光楼宇门禁",
   "config": {
+    "step": {
+      "user": {
+        "title": "星光楼宇门禁",
+        "description": "输入本分机（室内机）的房间号/设备ID（十六进制）。只有发给本分机的振铃和开锁指令才会触发状态。",
+        "data": {
+          "device_id": "房间号（设备ID）"
+        }
+      }
+    },
+    "error": {
+      "invalid_device_id": "设备ID无效，请输入 4 位十六进制，如 1602 或 16-02"
+    },
     "abort": {
       "single_instance_allowed": "只允许一个实例"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "修改房间号",
+        "description": "修改后集成将自动重载生效。",
+        "data": {
+          "device_id": "房间号（设备ID）"
+        }
+      }
+    },
+    "error": {
+      "invalid_device_id": "设备ID无效，请输入 4 位十六进制，如 1602 或 16-02"
     }
   },
   "entity": {
