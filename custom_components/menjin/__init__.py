@@ -89,6 +89,7 @@ class MenjinBus:
         self.answered = False
         self.unlocked = False
         self.unlock_time = 0.0
+        self._flow_id = b""              # 当前活动流程的分机ID (流程锚点)
         self._last_video_event = 0.0
         self._last_call_event = 0.0
         self._last_ring_time = 0.0
@@ -239,6 +240,7 @@ class MenjinBus:
         elif cmd == CMD_CALL_START:
             # 0x30 呼叫 (点名帧): 只有呼叫本机才触发
             if is_me:
+                self._flow_id = me
                 if not self.call_active:
                     self.call_active = True
                     new["call_active"] = True
@@ -256,6 +258,7 @@ class MenjinBus:
                 if now - self._last_ring_time < RING_DEBOUNCE:
                     return  # 双振铃, 忽略第二次
                 self._last_ring_time = now
+                self._flow_id = me
                 self.call_active = True
                 self.video_active = True
                 new["call_active"] = True
@@ -286,7 +289,11 @@ class MenjinBus:
                 self._fire_event("video", caller=devid.hex())
 
         elif cmd == CMD_HANGUP:
-            # 0x3a/0x3e 挂机 (广播): 流程结束, 复位状态
+            # 0x3a/0x3e 挂机: 按流程 ID 过滤 (v2.3)
+            # 只有本机挂机 或 全0广播 才复位; 邻居挂机不影响本机状态
+            is_broadcast = (devid == b"\x00\x00" and devid2 == b"\x00\x00")
+            if not (devid == me or devid2 == me or is_broadcast):
+                return  # 邻居挂机, 忽略
             if (self.call_active or self.video_active or self.answered):
                 if now - self._last_hangup_time < HANGUP_DEBOUNCE:
                     return
@@ -298,6 +305,7 @@ class MenjinBus:
                 if self.answered:
                     self.answered = False
                     new["answered"] = False
+                self._flow_id = b""
                 self._set_last("挂机", devid.hex() if devid != b"\x00\x00" else "")
                 self._fire_event("hangup", caller=devid.hex())
 
