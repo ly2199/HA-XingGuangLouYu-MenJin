@@ -55,6 +55,7 @@ CMD_FIX = {
     0x35: CMD_MONITOR,     0xb5: CMD_MONITOR,                          # ^0x80
     0x39: CMD_ACK,         0x3b: CMD_ACK,                              # ^0x02 (上下文判定)
     0x3a: CMD_HANGUP,      0xba: CMD_HANGUP,      0x3e: CMD_HANGUP,    # ^0x80 ^0x04
+    0x9d: CMD_HANGUP,      # 0x3a 严重干扰变体 (08-12 样本: ID@6-7 + 开锁后90s 通话挂机)
     0xf3: CMD_UNLOCK_F3,
     0x9a: CMD_TIMEOUT,
 }
