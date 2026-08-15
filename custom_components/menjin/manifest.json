@@ -1,7 +1,7 @@
 {
   "domain": "menjin",
   "name": "星光楼宇门禁",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "documentation": "https://github.com/ly2199/HA-XingGuangLouYu-MenJin",
   "requirements": [],
   "codeowners": ["@ly2199"],

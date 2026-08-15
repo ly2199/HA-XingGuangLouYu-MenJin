@@ -177,7 +177,7 @@ def try_parse_frame(frame: bytes) -> dict | None:
     if len(frame) < FRAME_LEN or frame[0] not in ACCEPT_HEADS:
         return None
     cmd_raw = frame[1]
-    if cmd_raw in DROP_HEADS:
+    if cmd_raw in CMD_DROP:
         return None
     cmd = fix_command(cmd_raw)
     if cmd is None:
@@ -205,7 +205,7 @@ def try_parse_frame_13(frame13: bytes) -> dict | None:
     if len(frame13) < FRAME_LEN_13 or frame13[0] not in ACCEPT_HEADS:
         return None
     cmd_raw = frame13[1]
-    if cmd_raw in DROP_HEADS:
+    if cmd_raw in CMD_DROP:
         return None
     cmd = fix_command(cmd_raw)
     if cmd is None:
